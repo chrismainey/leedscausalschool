@@ -1,0 +1,109 @@
+---
+title: '#LeedsCausalSchool'
+author: "Tennant PWGT, Tomova GD, Gilthorpe MS"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Activity 4(b). **Analysing ratio variables**
+
+### ***Learning objectives***
+
+-   Learn how to depict and consider deterministic relationships in DAGs
+-   Appreciate that analyses of ratio variable give rise to spurious associations
+-   Consider alternative modelling approaches for analysing ratio variables
+
+### ***Task 1.*** Create ratio variables from counts data.
+
+Load the necessary packages and data.
+
+```{r message=FALSE}
+packages <- c("curl", "vtable")
+new_packages  <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) install.packages(new_packages)
+invisible(lapply(packages, require, character.only = TRUE))
+
+options(scipen=999)
+
+data_3c <- read.csv(curl("https://raw.githubusercontent.com/georgiatomova/LeedsCausalSchool/master/4b_data.csv"))
+
+concise_summary <- function(Form,Data) {
+  mod  <- lm(Form, data=Data)
+  res  <- data.frame(cbind(coefficients(mod),confint(mod)))[-1,]
+  names(res) <- c("Estimate","L 95% CI","H 95% CI")
+  return(round(res,3)) }
+```
+
+We will be working with simulated data where the hypothetical context is the UK divided into 1000 health districts with census data complied for one year. The following variables are available: `population` - number of residents; `income` - total income (£M); `gp` - number of practicing GPs; `dentist` - number of practicing dentists; `deaths` - number of deaths. Familiarise yourself with the hypothesised DAG that we have included below, where we have included the latent variable 'Economic Base' which is thought to be driving both the area income and the population size. We consider any causal relationships between numbers of GPs and dentists, as well as between numbers of dentists and deaths to be too negligible.
+
+![](https://github.com/georgiatomova/LeedsCausalSchool/blob/master/4b-pic.png?raw=true)
+
+Briefly explore the summary statistics of the dataset below.
+
+```{r}
+st(data_3c, out="return")
+```
+
+Now imagine we were seeking to estimate the effect of numbers of GPs on numbers of deaths in the area. We would expect these numbers and, therefore, effects to differ substantially between areas with high and low population. One approach people use to 'control' for this is by analysing 'per capita' variables, i.e. including population as a common denominator. First, use the code below to create ratio variables from the original counts parent variables (where `pc` denotes 'per capita').
+
+```{r}
+data_3c$income_pc <- data_3c$income/data_3c$population
+data_3c$gp_pc <- data_3c$gp/data_3c$population
+data_3c$dentist_pc <- data_3c$dentist/data_3c$population
+data_3c$deaths_pc <- data_3c$deaths/data_3c$population
+
+st(data_3c, out="return")
+```
+
+Now that we have created the 'per capita' variables, try and think about what the DAG would look like if we only had ratio variables instead of count. How different would it look like, and can you think of some challenges that might arise?
+
+### ***Task 2.*** Compare adjustment for ratio variables and direct adjustment for confounding.
+
+The first approach that we are going to use for estimating the effect of GP numbers on deaths will be with the 'per capita' variables, which are a way of attempting to 'account for' the population differences among districts.
+
+```{r}
+gp_effect_pc <- lm(deaths_pc ~ gp_pc + income_pc, data = data_3c)
+concise_summary(gp_effect_pc, data_3c)
+```
+
+The model results above suggest that the more GPs per capita - the more deaths per capita. This sounds clearly implausible and concerning! Now let's check whether the model with the original counts variables will gives us the same or similar result. Based on the DAG, we need to adjust for income and population.
+
+```{r}
+gp_effect <- lm(deaths ~ gp + income + population, data = data_3c)
+concise_summary(gp_effect, data_3c)
+```
+
+This time the relationship is inverse, i.e. the more GPs, the fewer deaths. Which result do you think is correct and why?
+
+Aside from thinking about which result is more 'realistic', which is subjective because the data are simulated, it is helpful to focus on how different the results are. Simply including population numbers as a denominator (a very common practice!) instead of directly includinig it as a covariate leads to *sign reversal*. Population numbers will be highly correlated with death numbers by virtue of simply havinng more people 'available' to die (we can check this below in the correlation matrix). Therefore, by including it as a denominator we will inevitably invoke spurious associations between the variables, strong enough to even reverse the sign of the coefficient estimate.
+
+```{r}
+cor(data_3c)
+```
+
+The benefit of having a model with ratio variables is that the interpretation of the variables would be in the scale that we might want. For example, we might want to be interested in specifically the effect of more GPs *per capita* as opposed to simply GPs. There are a few strategies we can attempt to try and modify the ratio variables model in a way that is not mathematically coupled.
+
+One option is to simply adjust for the population variable directly in the 'per capita' model, and see whether this would fix the denominator in a way that does not lead to mathematical coupling.
+
+```{r}
+gp_effect_pc2 <- lm(deaths_pc ~ gp_pc + income_pc + population, data = data_3c)
+concise_summary(gp_effect_pc2, data_3c)
+```
+
+This barely makes any difference. The reason is that population is not the same as 1/population, which is what would represent it as a denominator. We can try adjusting for 1/population instead.
+
+```{r}
+gp_effect_pc3 <- lm(deaths_pc ~ gp_pc + income_pc + I(1/population), data = data_3c)
+concise_summary(gp_effect_pc3, data_3c)
+```
+
+Now the effect has been reversed back to nearly the 'truth', but not exactly. Why do you think that is?
+
+### ***Task 3.*** Identifying ratio variable issue in practice.
+
+The following extract and graph is from an OECD report on 'How Cities affect Citizens, Countries, and the Environment'. Do you agree with the interpretation of the figure? What do you believe the figure shows?
+
+> *"Figure 3.19 compares metropolitan areas with respect to population density and transport CO2 emissions per capita. It shows that transport-related urban emissions are relatively low in fairly compact cities, such as Shanghai and Barcelona, and especially so when public transport networks are more dense. In contrast, emissions per capita are a lot higher in spread-out urban agglomerations like Denver or Los Angeles.57 This suggests that large cities are not high polluters per se, but rather that their impact on the climate and environment depends on urban form and the way they are organised. While urban density is neither a necessary nor a sufficient condition for attaining lower per capita emissions, it can be an important factor."*
+
+![](https://github.com/georgiatomova/LeedsCausalSchool/blob/master/4b-pic2.png?raw=true)

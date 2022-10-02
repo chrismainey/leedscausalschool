@@ -1,0 +1,176 @@
+---
+title: '#LeedsCausalSchool'
+author: "Tomova GD"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Activity 3(a). **Collider Selection Bias**
+
+### ***Learning objectives***
+
+-   Recognise the presence of selection bias
+-   Learn how to correct for selection bias using inverse probability weighting
+-   Identify scenarios in which selection bias is structural and cannot be corrected for
+
+Begin by loading the necessary packages and creating functions for presenting concise model summaries.
+
+```{r message=FALSE}
+packages <- c("dagitty", "ipw", "dplyr", "survey", "curl", "Rfast", "cobalt", "vtable")
+new_packages  <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) install.packages(new_packages)
+invisible(lapply(packages, require, character.only = TRUE))
+
+options(scipen=999)
+
+concise_summary <- function(Form,Data,Family) {
+  mod  <- glm(Form, data=Data, family=Family)
+  res  <- data.frame(cbind(coefficients(mod),confint(mod)))[-1,]
+  names(res) <- c("Estimate","L 95% CI","H 95% CI")
+  return(round(res,3)) }
+```
+
+### ***Task 1.*** Control for selection bias using inverse probability-of-selection weighting.
+
+We are going to start by exploring a scenario in which selection bias can be minimised using inverse probability-of-selection weighting. As an example, we are going to be using the effect of **glycated haemoglobin (HbA1c)** on **cancer** in the context of a *case-control* study. It is often difficult to recruit study participants that are truly representative of the general populationn. There are many characteristics that are typically associated with lower or higher propensity of participations, making certain groups of people more or less likely to be interested in or able to take part in studies. For example, ethnicity and socio-economic position (SEP) are variables that often affect the propensity of selection into the study. We illustrate this scenario in the DAG below, where ethnicity and SEP are depicted as latent variables that affect the probability of selection ('sample'). We assume that the exposure and outcome themselves also affect participation since people with certain conditions may be more likely to take part in studies related to these conditions.
+
+![](https://github.com/georgiatomova/LeedsCausalSchool/blob/master/3b-pic.png?raw=true)
+
+We are going to be using data that has been simulated according to the data generation process illustrated above. Participants who are BME, with lower SEP, and/or high HbA1c were simulated to decrease the probability of participation in the study, whereas cancer increased the probability of participation (due to cases being typically more interested in taking part).
+
+In order to most clearly demonstrate bias due to selection, HbA1c was simulated to have *no effect* on cancer in the general population. Selection bias will therefore be evident if an effect is observed in the selected study sample even after controlling for confounding.
+
+Load and explore the two datasets below, the first one of which (`population`) includes the full simulated population (i.e. the general population), whereas the second one (`sample`) includes only participants that were recruited to take part in the case-control study. Briefly observe the summary statistics differences between the two datasets. Note that the latent ethnicity is measured using the BME varable (`0 = white, 1 = BME`), and latent SEP is measured using 'deprived' (where `1 = least deprived, 5 = most deprived`).
+
+```{r}
+population <- read.csv(curl("https://raw.githubusercontent.com/georgiatomova/LeedsCausalSchool/master/3b_full_data.csv"))
+st(population, out="return")
+
+sample <- read.csv(curl("https://raw.githubusercontent.com/georgiatomova/LeedsCausalSchool/master/3b_sample.csv"))
+st(sample, out="return")
+```
+
+We can now build models to estimate the effect of HbA1c on cancer in the study sample. We run an unadjusted model and a model adjusted for ethnicity and deprivation. Remember that this data are simulated so there is no unobserved confounding beyond the confounding that we simulate.
+
+```{r message=FALSE}
+naive <- glm(cancer ~ hba1c, family="binomial", data = sample)
+exp(concise_summary(naive, sample, "binomial"))
+
+adjusted <- glm(cancer ~ hba1c + BME + deprived, family="binomial", data = sample)
+exp(concise_summary(adjusted, sample, "binomial"))
+```
+
+We can see that the unadjusted model suggests that HbA1c increases the risk of cancer - OR: 1.47 (95% CI: 1.42, 1.53). Once we adjust for confounding, the bias is significantly reduced (OR: 1.15, 95% CI: 1.11, 1.21), but we would expect an OR much closer to 1 because we simulated *no* effect at all. In other words, the bias we observe is purely due to **selection**.
+
+To minimise the effect of selection bias, we can use the propensity of selection (participation) to build inverse probability weighting models, in the same way these are used with inverse probability of the exposure. We estimate the propensity of participation on the *full* population data, and we copy the IPW weights to the *sample* data (for the participants from the full population who end up in the sample).
+
+```{r}
+participation     <- glm(sample ~ BME + deprived + hba1c + cancer, family="binomial", data = population)
+
+population$propensity    <- predict(participation, type="response")
+population$IPW         <- (1/population$propensity)*(length(sample$id)/length(population$id))
+
+sample             <- left_join(sample, population[,c("id","IPW")], by=c("id")) 
+```
+
+Below, we plot the distribution of the propensity of selection, and we once again examine a summary of the two datasets, making note of the newly created variables.
+
+```{r}
+hist(population$propensity, freq=FALSE, main="Propensity of Selection")
+st(population, out="return", title="Population Summary Statistics")
+st(sample, out="return", title="Sample Summary Statistics")
+```
+
+We now move on to conducting the inverse probability weighted analyses. Below, we see that once the propensity of selection has been accounted for, there is no more selection bias and the OR produced by the model is nearly 1.
+
+```{r message=FALSE}
+ipw <- glm(cancer ~ hba1c + BME + deprived, family="quasibinomial", data = sample, weights = IPW) 
+exp(concise_summary(ipw, sample, "quasibinomial"))
+```
+
+How does this compare to conducting the analysis in the complete sample?
+
+```{r message=FALSE}
+adjusted_full <- glm(cancer ~ hba1c + BME + deprived, family="binomial", data=population)
+exp(concise_summary(adjusted_full, population, "binomial"))
+```
+
+The results are very similar. There is a little bit residual confounding left due to using binary BME and categorical deprived variables instead of the true latents. Try running the model below that includes direct adjustment for the latent variables (but remember that they are *latent*, so adjustment for them is generally not possible in practice).
+
+```{r message=FALSE}
+latent   <- glm(cancer ~ hba1c + L_ethnicity + L_SEP, family="binomial", data=population)
+exp(concise_summary(latent, population, "binomial"))
+```
+
+The OR is now exactly 1, and we see that HbA1c does not affect cancer at all. We can only completely uncover the truth if we have the underlying latent information behind ethnicity and socio-economic position!
+
+### ***Task 2.*** Can selection bias *always* be reversed?
+
+So far, we have explored a scenario in which the probability of participation does bias the results, but this can be fixed using IPW methods. However, sometimes selection bias is so severe that, unfortunately, there is little we can do about it.
+
+Similarly to the first task, we will use a full population dataset (`population2`) and a study sample dataset (`sample2`). The context of this example is largely inspired by [Griffith et al. (2021) *Collider bias undermines our understanding of COVID-19 disease risk and severity*](https://doi.org/10.1038/s41467-020-19478-2). Imagine we are (unfortunately) back to the beginnnig of the pandemic and were trying to determine whether being a health-worker could increase the severity of Covid-19, the hypothesis being that this is through higher viral loads and prolonged exposure to people infected with the virus. In the beginning of the pandemic, testing for the virus was not as widely accessible. We can summarise the types of people who would be most likely to get a Covid-19 test into two groups: either being a health-worker *or* having clear symptoms of the disease. Therefore, when conducting analyses, *testing* represents *selection* into the study - in order to be part of the analysis, you need to have been tested.
+
+We simulated data according to the DAG below in which both being a health-worker and having considerable Covid-19 symtpoms positively affected Covid-19 severity. `Testing (1 = tested, 0 = not tested)` represents a selection variable in which a value of 1 can only be received if the person is either a health-worker or has Covid-19 symptoms. We assume that around 90% of healthcare workers are routinely tested, and that 75% of people with symptoms also receive a test (regardless of how overly optimistic this sounds!). We also simulate a few confounding variables that we will be using to estimate the propensity of selection later on. After you have been familiarised with the DAG, load the two datasets and explore their summary statistics.
+
+![](https://github.com/georgiatomova/LeedsCausalSchool/blob/master/3b-pic2.png?raw=true)
+
+```{r}
+population2 <- read.csv(curl("https://raw.githubusercontent.com/georgiatomova/LeedsCausalSchool/master/3b_full_data_2.csv"))
+sample2 <- read.csv(curl("https://raw.githubusercontent.com/georgiatomova/LeedsCausalSchool/master/3b_sample_2.csv"))
+st(population2, out="return", title = "General population"); st(sample2, out="return", title="Study Sample")
+```
+
+What we can see from the summary statistics above is that the study sample is really different from the general population. Although age, sex and education are fairly similar, we can see that the study sample has significantly more people who either had symptoms, worked in healthcare, and had severe Covid-19, pointing to the presence of selection bias.
+
+We can explore models adjusted for confounding from using both the full and study samples, and see that the results would be quite different. The full population data suggests that the risk of severe Covid-19 is 5.1 and 4.1 times more likely, for those who work in healthcare or have sufficient symptoms to require testing, respectively. On the other hand, if we only looked at the study sample, it would seem that any increase in Covid severity is much smaller - only around 2.2 and 1.1 times more likely, respectively.
+
+**Occupation in healthcare**
+
+```{r message=FALSE}
+adjusted_full <- glm(severity~occupation+age+sex, family="binomial", data = population2)
+adjusted_sample <- glm(severity~occupation+age+sex, family="binomial", data = sample2)
+
+cat("Full population"); exp(concise_summary(adjusted_full, population2, "binomial"))
+cat("Sample"); exp(concise_summary(adjusted_sample, sample2, "binomial"))
+```
+
+**Presence of symptoms**
+
+```{r message=FALSE}
+adjusted_full2 <- glm(severity~symptoms+age+sex, family="binomial", data = population2)
+adjusted_sample2 <- glm(severity~symptoms+age+sex, family="binomial", data = sample2)
+
+cat("Full population"); exp(concise_summary(adjusted_full2, population2, "binomial"))
+cat("Sample"); exp(concise_summary(adjusted_sample2, sample2, "binomial"))
+```
+
+We can attempt to minimise the selection bias by calculating the propensity of selection and using inverse probability weighting, just like we did in Task 1.
+
+```{r}
+participation2 <- glm(tested ~ occupation + symptoms + sex + age + education, family="binomial", data=population2)
+population2$propensity <- predict(participation2, type="response")
+population2$IPW <- (1/population2$propensity)*length(sample2$id)/length(population2$id)
+sample2  <- left_join(sample2, population2[,c("id","IPW")], by=c("id")) 
+```
+
+```{r}
+hist(population2$propensity, freq=FALSE, main="Propensity of Selection")
+st(population2, out="return", title="Population Summary Statistics"); st(sample2, out="return", title="Sample Summary Statistics")
+```
+
+Now let's explore the results using IPW. First, we are going to estimate the effect of being a healthcare worker on Covid-19 severity. We can see in the model results below that even after conducting IPW, there is no improvement in the estimates at all. Unlike the first scenario, in which the *probability* of selection was affected by the patient characteristics, in this scenario for some participants it is not *possible* to receive testing (and therefore be selected). Such fundamental study design flaws like structural positivity violation cannot be 'fixed' post hoc.
+
+**IPW results - Occupation**
+
+```{r message=FALSE}
+ipw2 <- glm(severity ~ occupation + sex + age, family="quasibinomial", data = sample2, weights = IPW) 
+exp(concise_summary(ipw2, sample2, "quasibinomial"))
+```
+
+**IPW results - Symptoms**
+
+```{r message=FALSE}
+ipw2_s <- glm(severity ~ symptoms + sex + age, family="quasibinomial", data = sample2, weights = IPW) 
+exp(concise_summary(ipw2_s, sample2, "quasibinomial"))
+```

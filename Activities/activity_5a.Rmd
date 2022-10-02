@@ -1,0 +1,203 @@
+---
+title: '#LeedsCausalSchool'
+author: "Tomova GD"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Activity 5(a). **Compositional Data and Composite variables**
+
+### ***Learning objectives***
+
+-   Practice interpreting model output for compositional data
+-   Learn how to construct appropriate models with compositional data and composite variables
+-   Know how to make correct causal inferences with compositional data and composite variables
+-   Understand the estimating performance issues and 'information loss' in composite variables
+
+## Compositional data
+
+Imagine that we are interested in exploring the relationship between **energy intake** and **systolic blood pressure (SBP)**. Specifically, we are interested in the different causal effects that the three main types of macronutrients have on SBP, i.e. calories from fat, calories from protein, and calorie from carbohydrates (which together sum to total energy intake). Additionally, we are interested in the causal effect of total energy intake on SBP - the overall effect of energy intake irrespective of the macronutrient source (i.e. the weighted average causal effect of total energy).
+
+The DAG below depicts the different causal effects of the macronutrients on SBP. Note that, although we seek to estimate the total causal effect of total energy intake on SBP, there is no direct arc to illustrate this relationship, because the effect of total energy would be the weighted average effect of the constituent components (i.e. the arc is *redundant*). We ignore confounding variables and alcohol calories for ease of illustration.
+
+![](https://github.com/georgiatomova/LeedsCausalSchool/blob/master/5a-pic.png?raw=true)
+
+### ***Task 1*** - **Data Simulation**
+
+You will simulate data matching the causal scenario depicted in the DAG using the 'dagitty' R package. You will then use the data to construct different models for estimating the causal effects of each macronutrient and total energy intake on SBP.
+
+First, load the required packages, create the function for concise model summaries, and remove scientific notation.
+
+```{r message=FALSE}
+packages <- c("Matrix", "matrixcalc", "MASS", "dagitty", "vtable")
+new_packages  <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) install.packages(new_packages)
+invisible(lapply(packages, require, character.only = TRUE))
+  
+concise_summary <- function(Form,Data) {
+  mod  <- lm(Form, data=Data)
+  res  <- data.frame(cbind(coefficients(mod),confint(mod)))[-1,]
+  names(res) <- c("Estimate","L 95% CI","H 95% CI")
+  return(round(res,3)) }
+
+options(scipen=999)
+```
+
+We now construct the causal relationships in the DAG that will be used for data simulation using the `dagitty`. Note that we assign the strongest positive effect to fat (i.e. an increase in fat calories would lead to an increase in SBP), a weaker but still positive effect for carbs, and an inverse effect for protein.
+
+```{r}
+DAG <- dagitty('dag{fat  -> sbp [beta = 0.5] 
+                    carb -> sbp [beta = 0.3]
+                    prot -> sbp [beta = -0.1]}')
+```
+
+We will now simulate data using the causal structure we created.
+
+First, it is important to set the seed so that we all simulate the same variables and the results are reproducible each time.
+
+```{r}
+set.seed(9)
+```
+
+The `simulateSEM` function simulates the data. We specify that we would like to simulate 10,000 observations according to the causal relationships built in the `DAG`, and we call the newly created dataset `my_data`.
+
+```{r}
+my_data <- simulateSEM(DAG, N=10000, empirical=TRUE)
+```
+
+We can inspect the dataset we have created using the `sumtable` function and see that all four variables are currently multivariate normal (i.e. they have a mean=0 and SD=1).
+
+```{r}
+sumtable(my_data, out="return")
+```
+
+To obtain causal effect values that are plausible in the real world, we need to transform the variables using plausible mean and SD values. We assign the following:
+
+| Variable | Mean | SD  |
+|----------|------|-----|
+| Carb     | 1250 | 150 |
+| Fat      | 750  | 100 |
+| Prot     | 500  | 50  |
+| SBP      | 120  | 8   |
+
+We create a vector with the mean values called `mu`, and a vector with the sd values called `sd`. We use these vectors to transform all variables in `my_data` using a `for` loop, where `i` denotes each variable.
+
+```{r}
+mu <- c(1250, 750, 500, 120)                              
+sd <- c(150, 100, 50, 8) 
+for (i in 1:4) my_data[,i] <- my_data[,i]*sd[i] + mu[i]
+```
+
+Now examine the correlations structure of the dataset using the `cor` function and `round` this to `2` decimal places. We see that the macronutrients are independent of each other and that their relationships with SBP are equal to what we sought to construct.
+
+```{r}
+round(cor(my_data),2)
+```
+
+After we have finalised the simulation and transformation of the macronutrient components, it is now time to derive total energy intake (we name it `Total`) by summing the calories from carbs, fat, and protein. We also produce a `summary` of `MyData` to ensure that the simulation was successful.
+
+```{r}
+my_data$total <- my_data$fat + my_data$prot + my_data$carb
+st(my_data, out="return")
+```
+
+### ***Task 2*** - **Individual Macronutrient Effects**
+
+We will now examine the causal effects of each macronutrient on SBP using three different adjustment strategies:
+
+1.  No adjustment
+2.  Adjustment for the other two macronutrients
+3.  Adjustment for total energy intake
+
+#### **Carbs**
+
+First, we model the effect of carbs on SBP with no additional adjustments in the model, and we obtain the results.
+
+```{r}
+carbs_model <- lm(sbp ~ carb, data = my_data)
+concise_summary(carbs_model, my_data)*100
+```
+
+We now repeat the model, this time also adjusting for fat and protein.
+
+```{r}
+carbs_model_2 <- lm(sbp ~ carb + fat + prot, data = my_data)
+concise_summary(carbs_model_2, my_data)*100
+```
+
+Finally, we model the effect of carbs on SBP while adjusting for total energy intake.
+
+```{r}
+carbs_model_3 <- lm(sbp ~ carb + total, data = my_data)
+concise_summary(carbs_model_3, my_data)*100
+```
+
+#### **Fat**
+
+We now run the same models for fat.
+
+```{r}
+fat_model <- lm(sbp ~ fat, data = my_data)
+concise_summary(fat_model, my_data)*100
+
+fat_model_2 <- lm(sbp ~ fat + carb + prot, data = my_data)
+concise_summary(fat_model_2, my_data)*100
+
+fat_model_3 <- lm(sbp ~ fat + total, data = my_data)
+concise_summary(fat_model_3, my_data)*100
+```
+
+#### **Protein**
+
+And finally for protein.
+
+```{r}
+prot_model <- lm(sbp ~ prot, data = my_data)
+concise_summary(prot_model, my_data)*100
+
+prot_model_2 <- lm(sbp ~ prot + carb + fat, data = my_data)
+concise_summary(prot_model_2, my_data)*100
+
+prot_model_3 <- lm(sbp ~ prot + total, data = my_data)
+concise_summary(prot_model_3, my_data)*100
+```
+
+### ***Task 3*** - **Effect of Total Energy**
+
+Now that we have estimated the effects of the different macronutrients using different adjustment strategies, we want to estimate the overall effect of total energy intake, rather than energy coming from specific sources.
+
+Before continuing, we want to start by knowing what the 'true' effect of total energy would be in our example. Now that we know the effects of each macronutrient, and we can also obtain their relative contributions to total energy intake, we can calculate the true effect.
+
+```{r}
+true_total <- 1.6*(mean(my_data$carb)/mean(my_data$total)) +
+             4*(mean(my_data$fat)/mean(my_data$total)) +
+            -1.6*(mean(my_data$prot)/mean(my_data$total))
+                   
+true_total
+```
+
+We first use the 'standard' appraoch which involves regressing SBP on total energy intake.
+
+```{r}
+total_model <- lm(sbp ~ total, data = my_data)
+concise_summary(total_model, my_data)*100
+```
+
+However, we can see that the effect of total energy is incorrectly estimated. We must remember that the simulation does not involve any confounding, so we would expect this result to be unbiased.
+
+We now try the all-components approach that combines the average effects and variable proportions in total energy.
+
+```{r}
+allcomp_model <- lm(sbp ~ carb + fat + prot, data = my_data)
+
+wi <- c(mean(my_data$carb)/mean(my_data$total),
+       mean(my_data$fat)/mean(my_data$total),
+       mean(my_data$prot)/mean(my_data$total))
+
+effect <- (wi[1]*allcomp_model$coefficients[2]*100+ wi[2]*allcomp_model$coefficients[3]*100+wi[3]*allcomp_model$coefficients[4]*100)
+
+unname(effect)
+```
+
+This time we can see that the effect of total energy is correctly estimated, because we do not rely on a composite variable to capture the effects of all constituent components.

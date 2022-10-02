@@ -1,0 +1,354 @@
+---
+title: '#LeedsCausalSchool'
+author: "Tennant PWG"
+output:
+  html_document:
+    df_print: paged
+---
+
+## **Activity 3(c). A fuzzy regression discontinuity analyses**
+
+### ***Learning objectives***
+
+-   Learn the key principles of carrying out a fuzzy regression discontinuity analysis using the two-stage approach
+-   Consider and identify some important limitations of regression discontinuity analyses
+
+Begin by loading the necessary packages, and creating a function that presents a concise summary of the model results (point estimates and 95% CIs).
+
+```{r message=FALSE, warning=FALSE}
+packages <- c("curl",
+              "MASS",
+              "ggplot2",
+              "vtable",
+              "data.table",
+              "htmlwidgets")
+
+suppressMessages(invisible((lapply(packages, require, character.only = TRUE))))
+
+options(scipen=999)
+
+concise_summary   <- function(model) {
+  results         <- data.frame(cbind(coefficients(model),confint(model)))[-1,]
+  names(results)  <- c("Estimate","L 95% CI","H 95% CI")
+  return(round(results,3)) }
+```
+
+### ***Real-world example***
+
+In 2019, Wang, Jones, and Wang uploaded a pre-print to the Social Science Research Network entitled '[Early-Career Setback and Future Career Impact](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3353841)'. The study attracted substantial attention in the scientific press and on social media, with prominent coverage in the [Economist Magazine](https://www.economist.com/graphic-detail/2019/05/10/success-in-academia-is-as-much-about-grit-as-talent) and [Financial Times](https://www.ft.com/content/00672054-77b7-11e9-bbad-7c18c0ea0201).
+
+The study sought to estimate the causal effect of early grant success (from the National Institute for Health, NIH) on later scientific influence and performance (estimated from the average number of citations per paper). More specifically, the study used a regression-discontinuity approach to compare the difference in average citations 5-10 years after applying for an NIH grant among a sample of scientists who's applications were scored very similarly in peer review, but fell either side of the threshold for funding. The two groups were termed 'near miss' and 'near win' applicants, and the running variable (`normalised score`) represents the peer-review score, where a negative score is deemed suitable for funding, a positive score is deemed unsuitable for funding, and a score of zero is the threshold. Wang, Jones, and Wang specifically looked at those within a window of +-5 units.
+
+![](https://github.com/georgiatomova/LeedsCausalSchool/blob/master/3c-pic-1.png?raw=true){width="500"}
+
+We simulated data to replicate their data, which we will use to practice the two stages involved in running a fuzzy regression-discontinuity analysis.
+
+### ***Task 1. Modelling the probability of exposure***
+
+We begin by importing and summarising the simulated data
+
+```{r message=FALSE, warning=FALSE}
+wang_sample      <- read.csv(curl("https://raw.githubusercontent.com/georgiatomova/LeedsCausalSchool/master/3c_sample.csv"))
+```
+
+The data includes the following variables:
+
+-   **female** - 0 = male, 1 = female
+
+-   **age** - the number of years into their career at the time of application
+
+-   **citations_t0** - the average citations per paper at the time of application
+
+-   **normalised score** - the *running variable* representing the score given by the peer reviewers
+
+-   **grant_success** - the *exposure*, 0 = not funded, 1 = funded
+
+-   **citations_t5** - the *outcome*, the average citations per paper five years after application
+
+Wang, Jones, and Wang tried to identify an equal number of individuals who did and did not receive funding - but whereas they examined 170,000 individuals we are looking at a smaller sample of around 6700 to speed up the analysis.
+
+Let's start by summarising the data:
+
+```{r message=FALSE, warning=FALSE}
+sumtable(wang_sample,
+         out="return")
+```
+
+> **[Question] How plausible are these data? Are there any aspects that stand out?**
+
+Because the normalised score does not perfectly determine grant success, we will need to use the two-stage 'fuzzy' approach.
+
+First we will model the relationship between the normalised score and the probability of funding success. We can do this by running a simple logistic regression and saving the predicted values for each participant. We'll return the (exponentiated) coefficients for interpretation.
+
+```{r message=FALSE, warning=FALSE}
+glm_prob_success <- glm(grant_success ~ normalised_score,
+                        data=wang_sample,
+                        family = "binomial",
+                        na.action="na.exclude")
+
+wang_sample$prob_successs <- predict(glm_prob_success,
+                                     type="response")
+
+suppressMessages(exp(concise_summary(glm_prob_success)))
+```
+
+> **What does this mean? Is it what you would expect?**
+
+It might be easier to interpret if we plot the relationship:
+
+```{r message=FALSE, warning=FALSE}
+ggplot(data = wang_sample) + 
+  theme_classic(base_size = 16,
+                base_family="sans",
+                base_line_size=1) +
+  geom_smooth(data = wang_sample[which(wang_sample$normalised_score<0),],
+              aes(x=normalised_score, y=prob_successs), 
+              formula = y ~ x,
+              method="loess",
+              span=0.1,
+              color="#5AB3D1",
+              size=2) + 
+  geom_smooth(data = wang_sample[which(wang_sample$normalised_score>=0),],
+              aes(x=normalised_score, y=prob_successs),
+              formula = y ~ x,
+              method="loess",
+              span=0.1,
+              color="#EE6D01",
+              size=2) + 
+  geom_vline(xintercept = 0,
+             colour = "black",
+             size=0.5) +
+  annotate("rect",
+           xmin = -5,
+           xmax = 5,
+           ymin = 0,
+           ymax = 1,
+           alpha = .1) +
+  scale_x_continuous(name="Normalised Score",
+                     expand=c(0,0),
+                     breaks=c(-100, -75, -50, -25, 0, 25, 50, 75, 100)) +
+  scale_y_continuous(name="Probability of Grant Success",
+                     expand=c(0,0),
+                     n.breaks=5,
+                     labels = c("0%", "25%", "50%", "75%", "100%")) +
+  coord_cartesian(xlim=c(-100, 100),
+                  ylim=c(0, 1))
+
+```
+
+> **[Question] Does this relationship make sense? Is it reasonable for a fuzzy RDD study?**
+
+### ***Task 2. Checking the exchangeability assumption***
+
+We decide to go ahead with conducting the analysis, but we need to chose a suitable 'window' of analysis, within which the applicants are roughly exchangeable. We can consider two variables, `age` and `female`, both of which might effect the probability of funding success (`prob_success`).
+
+First, let's compare the average career age in the full sample:
+
+```{r message=FALSE, warning=FALSE}
+
+ggplot(data = wang_sample) + 
+  theme_classic(base_size = 16,
+                base_family="sans",
+                base_line_size=1) +
+  stat_summary(data=wang_sample[which(wang_sample$grant_success==1),],
+               aes(x=grant_success, y=age), fun.data = mean_cl_normal,
+               geom = "errorbar", color="#5AB3D1", size=1) +
+  stat_summary(data=wang_sample[which(wang_sample$grant_success==0),],
+               aes(x=grant_success, y=age), fun.data = mean_cl_normal,
+               geom = "errorbar", color="#EE6D01", size=1) +
+  scale_x_continuous(name="Grant Success",
+                     expand=c(0,0),
+                     n.breaks=5,
+                     labels = c("", "No", "", "Yes", "")) +
+  scale_y_continuous(name="Career Age (Years)",
+                     expand=c(0,0),
+                     breaks=c(8, 9, 10, 11)) +
+  coord_cartesian(ylim=c(8, 11),
+                  xlim=c(-0.5, 1.5))
+
+```
+
+There is a clear difference in the average career age between those who won and lost out on funding. But what about in the small +-5 window around the threshold?
+
+```{r message=FALSE, warning=FALSE}
+
+ggplot(data = wang_sample[which(wang_sample$normalised_score>=-5 & wang_sample$normalised_score<5),]) + 
+  theme_classic(base_size = 16, 
+                base_family="sans", 
+                base_line_size=1) +
+  stat_summary(data=wang_sample[which(wang_sample$normalised_score>=-5 & wang_sample$normalised_score<5 & wang_sample$grant_success==1),],
+               aes(x=grant_success, y=age),
+               fun.data = mean_cl_normal,
+               geom = "errorbar",
+               color="#5AB3D1",
+               size=1) +
+  stat_summary(data=wang_sample[which(wang_sample$normalised_score>=-5 & wang_sample$normalised_score<5 & wang_sample$grant_success==0),],
+               aes(x=grant_success, y=age),
+               fun.data = mean_cl_normal,
+               geom = "errorbar",
+               color="#EE6D01",
+               size=1) +
+  scale_x_continuous(name="Grant Success",
+                     expand=c(0,0),
+                     n.breaks=5,
+                     labels = c("", "No", "", "Yes", "")) +
+  scale_y_continuous(name="Career Age (Years)",
+                     expand=c(0,0),
+                     breaks=c(8, 9, 10, 11)) +
+  coord_cartesian(ylim=c(8, 11),
+                  xlim=c(-0.5, 1.5))
+```
+
+In the small +-5 window around the threshold, the career age is almost identical.
+
+Is the same true for sex. First let's look in the full sample?
+
+```{r message=FALSE, warning=FALSE}
+
+ggplot(data = wang_sample) + 
+  theme_classic(base_size = 16,
+                base_family="sans",
+                base_line_size=1) +
+  stat_summary(data=wang_sample[which(wang_sample$grant_success==1),],
+               aes(x=grant_success, y=female),
+               fun.data = mean_cl_normal,
+               geom = "errorbar",
+               color="#5AB3D1",
+               size=1) +
+  stat_summary(data=wang_sample[which(wang_sample$grant_success==0),],
+               aes(x=grant_success, y=female),
+               fun.data = mean_cl_normal,
+               geom = "errorbar",
+               color="#EE6D01",
+               size=1) +
+  scale_x_continuous(name="Grant Success",
+                     expand=c(0,0),
+                     n.breaks=5,
+                     labels = c("", "No", "", "Yes", "")) +
+  scale_y_continuous(name="Proportion Female",
+                     expand=c(0,0),
+                     n.breaks=6) +
+  coord_cartesian(xlim=c(-0.5, 1.5),
+                  ylim=c(0, 0.5))
+```
+
+Again we see a difference in the proportion of women who get funded. But what about in the small +-5 window around the threshold?
+
+```{r message=FALSE, warning=FALSE}
+
+ggplot(data = wang_sample[which(wang_sample$normalised_score>=-5 & wang_sample$normalised_score<5),]) + 
+  theme_classic(base_size = 16,
+                base_family="sans",
+                base_line_size=1) +
+  stat_summary(data=wang_sample[which(wang_sample$normalised_score>=-5 & wang_sample$normalised_score<5 & wang_sample$grant_success==1),],
+               aes(x=grant_success, y=female),
+               fun.data = mean_cl_normal,
+               geom = "errorbar",
+               color="#5AB3D1",
+               size=1) +
+  stat_summary(data=wang_sample[which(wang_sample$normalised_score>=-5 & wang_sample$normalised_score<5 & wang_sample$grant_success==0),],
+               aes(x=grant_success, y=female),
+               fun.data = mean_cl_normal,
+               geom = "errorbar",
+               color="#EE6D01",
+               size=1) +
+  scale_x_continuous(name="Grant Success",
+                     expand=c(0,0),
+                     n.breaks=5,
+                     labels = c("", "No", "", "Yes", "")) +
+  scale_y_continuous(name="Proportion Female",
+                     expand=c(0,0),
+                     n.breaks=6) +
+  coord_cartesian(xlim=c(-0.5, 1.5),
+                  ylim=c(0, 0.5))
+```
+
+There appears to be a *larger* sex difference in the at the threshold?
+
+> **[Question] Can you think of any reasons why we would see a larger sex difference in the smaller sample around the threshold?**
+
+The sex difference means that the units of analysis are not unconditionally exchangeable, we will therefore have to condition on sex to ensure exchangeable units of comparison (if we think sex also causes the outcome).
+
+### ***Task 2. Estimating the Compiler Average Causal Effect (CACE)***
+
+We begin by naively comparing the average citations 5-years after application in the 'near miss' and 'near win' applicants:
+
+```{r message=FALSE, warning=FALSE}
+
+ggplot(data = wang_sample[which(wang_sample$normalised_score>=-5 & wang_sample$normalised_score<5),]) + 
+  theme_classic(base_size = 16,
+                base_family="sans",
+                base_line_size=1) +
+  stat_summary(data=wang_sample[which(wang_sample$normalised_score>=-5 & wang_sample$normalised_score<5 & wang_sample$grant_success==1),],
+               aes(x=grant_success, y=citations_t5),
+               fun.data = mean_cl_normal,
+               geom = "errorbar",
+               color="#5AB3D1",
+               size=1) +
+  stat_summary(data=wang_sample[which(wang_sample$normalised_score>=-5 & wang_sample$normalised_score<5 & wang_sample$grant_success==0),],
+               aes(x=grant_success,
+                   y=citations_t5),
+               fun.data = mean_cl_normal,
+               geom = "errorbar",
+               color="#EE6D01",
+               size=1) +
+  scale_x_continuous(name="Grant Success",
+                     expand=c(0,0),
+                     n.breaks=5,
+                     labels = c("", "No", "", "Yes", "")) +
+  scale_y_continuous(name="Average citations per paper") +
+    coord_cartesian(xlim=c(-0.5, 1.5),
+                    ylim=c(30, 45))
+```
+
+> **[Question] What do these results appear to show? Are they surprising?**
+
+Technically, we shouldn't be comparing the outcome between the funded and unfunded in this way. This is because the discontinuity is fuzzy not sharp there is a sex difference that may confound the effect.
+
+The correct approach is therefore to use the *probability of grant success* (`prob_success`) as the exposure, which we estimated in the first model above.
+
+To estimate the effect of the *probability of grant success* on future performance, we can conduct a simple linear regression, but more sophisticated approaches may also be used.
+
+For completeness we will also perform a naive analyse using the actual `grant_success` variable, to see what bias is introduced by not recognising the fuzzy discontinuity.
+
+```{r message=FALSE, warning=FALSE}
+
+
+glm_citations_t5_1  <- glm(citations_t5 ~ grant_success + female,
+                         data=wang_sample[which(wang_sample$normalised_score>=-5 & wang_sample$normalised_score<5),],
+                         na.action="na.exclude")
+
+glm_citations_t5_2  <- glm(citations_t5 ~ prob_successs + female,
+                         data=wang_sample[which(wang_sample$normalised_score>=-5 & wang_sample$normalised_score<5),],
+                         na.action="na.exclude")
+
+suppressMessages(concise_summary(glm_citations_t5_1))
+suppressMessages(concise_summary(glm_citations_t5_2))
+
+```
+
+> **[Question] What do these results appear to show? Are they surprising?**
+
+Despite a larger point estimate when modelled correctly, we cannot distinguish the effect from the null. This could be due to limited sample size when looking only at participants within the small range of +-5 . To provide more power we could relax our window slightly, for example looking at all applications with +-25 of the threshold:
+
+```{r message=FALSE, warning=FALSE}
+
+glm_citations_t5_3  <- glm(citations_t5 ~ prob_successs + female,
+                         data=wang_sample[which(wang_sample$normalised_score>=-25 & wang_sample$normalised_score<25),],
+                         na.action="na.exclude")
+
+suppressMessages(concise_summary(glm_citations_t5_3))
+
+```
+
+Using a wider threshold has given us more precision, but we may have sacrificed accuracy if the units are no longer exchangeable. Ideally, we would examine several thresholds and check that they give similar results.
+
+### ***Task 3. Deeper thinking***
+
+Regardless of the strength of effect in our simulated dataset, Wang, Jones, and Wang found a *negative* causal effect of grant funding on future success (in terms of average citations).
+
+![](https://github.com/georgiatomova/LeedsCausalSchool/blob/master/3c-pic-2.png?raw=true){width="500"}
+
+The Economist and Financial Times interpreted this as a sign that early failure can make us into stronger scientists, and that good science is as much about effort and grit as about talent.
+
+> **[Question] Can you think of any other explanations? And can these be shown using a causal diagram?**

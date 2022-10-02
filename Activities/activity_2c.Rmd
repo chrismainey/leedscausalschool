@@ -1,0 +1,281 @@
+---
+title: '#LeedsCausalSchool'
+author: "Tomova GD"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Activity 2(c). **Propensity Score Approaches**
+
+### ***Learning objectives***
+
+-   Learn how to calculate propensity scores in R
+-   Explore different propensity score approaches: direct adjustment, matching, inverse probability weighting
+-   Experience some of the practical limitations of propensity score approaches
+
+Begin by loading all necessary packages, and creating a function that presents a concise model summary (point estimates and 95% CIs).
+
+```{r message=FALSE}
+packages <- c("MatchIt", "Hmisc", "ipw", "survey", "Rfast", "cobalt", "vtable", "curl")
+new_packages  <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) install.packages(new_packages)
+invisible(lapply(packages, require, character.only = TRUE))
+
+options(scipen=999)
+
+concise_summary <- function(Form,Data) {
+  mod  <- lm(Form, data=Data)
+  res  <- data.frame(cbind(coefficients(mod),confint(mod)))[-1,]
+  names(res) <- c("Estimate","L 95% CI","H 95% CI")
+  return(round(res,3)) }
+```
+
+### ***Task 1.*** Direct adjustment for confounders.
+
+Before we begin exploring propensity scores, it might be useful to first start by building a 'traditional' model that directly adjusts for confounders as covariates, which we can use for comparison with other approaches later on.
+
+We will practice on the 'LaLonde' dataset which comes with the `MatchIt` package and provides data on US individuals who were either selected or not selected to enrol in a job training programme by the Manpower Demonstration Research Corporation [(LaLonde, 1986)](https://www.jstor.org/stable/1806062). The following variables are available: `treat` (0 = not enrolled, 1 = enrolled), `age` (years), `educ` (years of education), `race` (black, hispanic, white), `married` (0 = not married, 1 = married), `nodegree` (0 = high school degree, 1 = no high school degree), `re74` (income in 1974 in US dollars), `re75` (income in 1975 in US dollars), `re78` (income in 1978 in US dollars).
+
+`Treat` is the **exposure** and `re78` is the **outcome**, i.e the effect of interest is the effect of the educational programme on earnings in 1978. All other variables are 'pre-treatment' (measured before selection into the prgoramme).
+
+To begin with, briefly familiarise yourself with the dataset.
+
+```{r rows.print=12}
+sumtable(lalonde, out="return")
+```
+
+If we conducted a 'naïve' unadjusted analysis, we would see that participation in the training programme is inversely associated with earnings in 1978, and that on average those enrolled in the programme earned 635 dollars less than those unenrolled, suggesting that the training actually reduced earnings.
+
+```{r}
+naive <- lm(re78 ~ treat, data=lalonde)
+concise_summary(naive, lalonde)
+```
+
+However, the selection into the programme was ***not*** random. The educational programme specifically targeted former criminal offenders or those with history of substance misuse, school dropouts, and unemployed women. Therefore, those who were enrolled in the job training programme were systematically different from those who were not.
+
+To overcome this, we would need to control for all the differences between the two groups. This can be achieved in different ways, e.g., by covariate adjustment for confounders, or by using propensity score methods. In this exercise, we will use both approaches and compare the findings. We first start by using direct adjustment for confounders. Since all variables are pre-treatment, we can safely assume that are all true confounders and none of them mediate the effect of the job training programme on future earnings. We therefore include all in the model.
+
+```{r}
+adj_conf <- lm(re78 ~ treat + age + educ + race + married + nodegree + re74 + re75, data=lalonde)
+concise_summary(adj_conf, lalonde)
+```
+
+We can now see that the result is quite different, and actually those receiving job training on average earned a lot more than those who did not, conditional on all confounders.
+
+### ***Task 2.*** Creating a propensity score.
+
+You will now learn and explore the basic principles of creating and using propensity scores in R, with the package `MatchIt`. There are alternative packages you may wish to explore in your own time, such as `Matching` and `Optmatch`.
+
+First, to calculate the propensity (`prop`) of the exposure (treatment), we regress the `treat` variable on all covariates that we believe act as confounders. Again, we argue that all variables should be included.
+
+```{r}
+prop <- glm(treat ~ age + educ + race + married + nodegree + re74 + re75, data=lalonde, family="binomial")
+concise_summary(prop, lalonde)
+```
+
+We now predict the propensity score (`ps`) and bind the calculated values to the dataset, so that we can directly adjust for the propensity score later on.
+
+```{r}
+lalonde$ps <- predict(prop, type="response")
+```
+
+Briefly observe the dataset again and make note of the new variable `ps` - the propensity score.
+
+```{r rows.print=13}
+sumtable(lalonde, out="return"); hist(lalonde$ps, freq=FALSE)
+```
+
+### **Task 3.** Propensity score covariate adjustment.
+
+The simplest propensity score approach is adjustment for the propensity score as a covariate. To do this, simply regress the outcome on the exposure and the propensity score, in a model we call `adj_ps`.
+
+```{r}
+adj_ps <- lm(re78 ~ treat + ps, data=lalonde)
+concise_summary(adj_ps, lalonde)
+```
+
+The results are not identical, but you can see that they are relatively similar, considering the 'naive' model produced negative effect estimates.
+
+It is also possible to explore a 'doubly robust' approach (in the model called `adj_ps_dr`), in which in addition to the propensity score, adjustment is also made directly for the confounders. This model produces an estimate, the size of which is somewhat in-between adjustment only for the propensity score or only for the confounders.
+
+```{r}
+adj_ps_dr <- lm(re78 ~ treat + ps + age + educ + race + married + nodegree + re74 + re75, data=lalonde)
+concise_summary(adj_ps_dr, lalonde)
+```
+
+### **Task 4.** Propensity score matching.
+
+There are different approaches to identifying the most appropriate matches, e.g. greedy matching, optimal matching, nearest neighbour (with or without calipers) matching, etc. A comprehensive overview and discussion of the different methods is available in [Austin, 2011](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3144483/).
+
+In this example, we will be using *nearest neighbour matching with a 1:1 ratio*. This approach matches participants from the 'control' group to participants in the enrolled group when they have the smallest absolute difference between their propensity scores. We will be using 1:1 ratio matching, which means that some participants from the control group will be unmatched and discarded. It is possible to avoid this by matching more than one control unit to each treatment unit by tweaking the 'ratio' argument (see model below).
+
+Participants will be matched using the `matchit` function in the `MatchIt` package, specifying the treatment variable `treat` and including all covariates, choosing the nearest neighbour approach with `method="nearest"` and selecting 1:1 ratio with `ratio=1`.
+
+```{r}
+match <- matchit(treat ~ age + educ + race + married + nodegree + re74 + re75,
+                data=lalonde,
+                method="nearest",
+                ratio=1)
+```
+
+We can now inspect the matching we have created using `summary` below.
+
+First, we can see the balance between groups for all data, i.e. *before* matching. Note that there are some striking differences between the participants from the two groups, e.g. in terms of income and ethnicity - those who received treatment were a lot less likely to be white and had a lot lower income.
+
+Second, we can see the balance between the groups for matched data, i.e. *after* matching. We can see considerable improvement in some variables such as income, but less so in others such as ethnicity. However, bear in mind that if some variables differ too much between groups, e.g., only 18 out of 299 white participants were in the treatment group, it would not be possible to find perfect matches. Matching cannot 'fix' selection bias and positivity violation.
+
+```{r}
+summary(match)
+```
+
+We can explore the differences in propensity between the matched and unmatched participants by plotting them. Below, we can see that the matched treated and untreated units have comparable levels of propensity, whereas all of the unmatched participants have very low propensity of the exposure - this is to be expected since a lot more participants were enrolled into the programme than not. There is some more clustering of participants with higher propensity in the treated group, and similarly - clustering of participants with lower propensity in the control group, but overall the matching seems balanced.
+
+```{r}
+invisible(capture.output(plot(match, type = "jitter")))
+```
+
+We now save the successfuly matched participants in a new subpopulation dataset called `match.data` and explore it. Note that the mean and median of `treat` are now 0.5, i.e. exactly half of the participants received job training and half did not.
+
+```{r rows.print=13}
+match.data = match.data(match); sumtable(match.data, out="return")
+```
+
+We can also visually explore the balance between treated and untreated participants before and after matching. We can see some improvement, but the groups are not perfectly balanced even after matching. It is important to remember that matching cannot offer substantial improvement when selection bias and positivity violation are severe.
+
+```{r}
+histbackback(split(lalonde$ps, lalonde$treat), main= "Propensity score before matching", xlab=c("control", "treatment"), xlim=c(-300,100))
+histbackback(split(match.data$ps, match.data$treat), main= "Propensity score after matching", xlab=c("control", "treatment"), xlim=c(-300,100))
+```
+
+In theory, once matching has been conducted, there should be no residual confounding (i.e. no need for confounding adjustment), and the two groups should be exchangeable. We suspect this would not be the case in practice now, because of the groups remaining imbalanced, but we can nevertheless try and estimate the effect of the job training programme with an unadjusted (`match_naive`) model in the matched data.
+
+```{r}
+match_naive <- lm(re78 ~ treat, data=match.data)
+concise_summary(match_naive, match.data)
+```
+
+This is quite different to the approaches we tried earlier and suggests there still is residual confounding left. We can try a 'doubly robust' approach in which we estimate the new propensity score in the matched data and make adjustment for it.
+
+```{r}
+match_prop <- glm(treat ~ age + educ + race + married + nodegree + re74 + re75, data=match.data, family="binomial")
+match.data$ps <- predict(match_prop, type="response")
+match_ps <- lm(re78 ~ treat + ps, data=match.data)
+concise_summary(match_ps, match.data)
+```
+
+The result is very similar to the one when adjustment is made for both the propensity score and all confounders. Alternatively, we can also try direct adjustment for confounding instead, and we get a very similar estimate.
+
+```{r}
+match_adj <- lm(re78 ~ treat + age + educ + race + married + nodegree + re74 + re75, data=match.data)
+concise_summary(match_adj, match.data)
+```
+
+### **Task 5.** Inverse Probability Weighting (IPW)
+
+The final approach to reducing confounding that we will explore is IPW. Since the two groups (enrolled vs unenrolled) are very different, we can try and making them more balanced by assigning larger weights to those who are 'under-represented' (e.g. non-white people in the treatment group), and smaller weights to those who are over-represented. We will use this to create a pseudopopulation in which the exposed and unexposed have equal propensities of the exposure. Before we begin, it is useful to explore the original propensity distributions in the control vs treatment groups. Below we can see that they are quire different.
+
+```{r}
+sumtable(lalonde[which(lalonde$treat==0),], out="return", vars = "ps", title = "Propensity Score Summary Statistics of Untreated")
+sumtable(lalonde[which(lalonde$treat==1),], out="return", vars = "ps", title = "Propensity Score Summary Statistics of Treated")
+
+sumtable(lalonde[which(lalonde$treat==0),], out="return", title = "Full Summary Statistics of Untreated")
+sumtable(lalonde[which(lalonde$treat==1),], out="return", title = "Full Summary Statistics of Treated")
+```
+
+```{r}
+par(mfrow=c(2,1))
+hist(lalonde[which(lalonde$treat==0),]$ps, xlim = c(0,1), xlab = "Control", main = "Propensity score", col = "red", freq=FALSE)
+hist(lalonde[which(lalonde$treat==1),]$ps, xlim = c(0,1), xlab = "Treatment", main = "", col = "blue", freq=FALSE)
+par(mfrow=c(1,1))
+```
+
+To calculate the weights, we will use the `ipwpoint` function from the `ipw` package. This function is for single time-point exposures, such as the one we are dealing with. In scenarios with more complex time-varying exposures, the package provides the alternative function `ipwtm`.
+
+To use this function, we need to specify the exposure variable, the type of link function, the 'right hand-side of the model' (i.e. all confounders needed for estimating the propensity), and the dataset. After saving the results in `weights`, we can briefly explore them. Note that there are some 'extreme' weights - the maximum value is 40.077, which is quite large, compared to the minimum (1.009) and mean (1.905), which are very similar. Remember that such extreme weights might lead to unstable model estimates.
+
+```{r}
+weights <- ipwpoint(
+    exposure = treat,
+    family = "binomial",
+    link = "logit",
+    denominator = ~ age + educ + race + married + nodegree + re74 + re75,
+    data = lalonde
+)
+
+summary(weights$ipw.weights)
+```
+
+We can also visually inspect the weights by plotting them using the `ipwplot` function. We can see below that most of the weights are concentrated around the same value with only a few having extreme values. For visalisation purposes we can also explore them on the log scale (in the 2nd plot).
+
+```{r}
+ipwplot(weights$ipw.weights, logscale=FALSE, xlab="Weights")
+ipwplot(weights$ipw.weights, logscale=TRUE, xlab="Log Weights")
+```
+
+Now that we have calculated the weights, we bind them to the original dataset.
+
+```{r rows.print=14}
+lalonde$weights <- weights$ipw.weights
+sumtable(lalonde, out="return")
+```
+
+Finally, we can explore the propensity scores balance in an unweighted and weighted population using `bal.plot` from the `cobalt` package. We can see that the weighted population is actually a lot more balanced than what we had before.
+
+```{r}
+bal.plot(treat ~ age + educ + race + married + nodegree + re74 + re75 + ps, 
+         data=lalonde, 
+         var.name = "ps", 
+         weights = lalonde$weights,
+         which = "both",
+         type = "histogram", 
+         mirror = TRUE,
+         colors = c("red","blue"))
+```
+
+We can now fit a model using the weights we calculated. To do this, we use the `svyglm` function from the `survey` package, in which we specify the outcome and exposure, no additional adjustments, weights equal to the weights column in the dataset, and the dataset to be used.
+
+```{r}
+model_ipw <- svyglm(re78 ~ treat, design = svydesign(~ 1, weights = ~ weights, data = lalonde))
+concise_summary(model_ipw, lalonde)
+```
+
+This time, the results are very different from what we have been obtaining so far with the other approaches. We can see that the coefficient is a lot smaller, and knowing that the naive estimate is negative, this suggests considerable residual confounding. Some of the weights were extreme, which means that certain participants would be substantially driving the estimates. We can explore this further by investigating the participants who were assigned extreme weights.
+
+We select the participants with the three highest weights and explore them in detail.
+
+```{r}
+lalonde[c(which(lalonde$weights==(nth(lalonde$weights, 1, descending = T))),
+          which(lalonde$weights==(nth(lalonde$weights, 2, descending = T))),
+          which(lalonde$weights==(nth(lalonde$weights, 3, descending = T)))),]
+```
+
+We can see that the most extreme weights were assigned to participants who were treated but who had very low propensities of actually receiving treatment. The most extreme weight was assigned to a participant who had years of education above average, was white, had a high school degree, and had considerably high earnings in 1974. Overall, his propensity of receiving treatment was very low. Despite this, he received job training (which could have been due to many other factors for which data is not available), but his earnings dropped to 0 in 1978. Since his weight is almost double the weights of the second and third most extreme-weight participants, it is not surprising that the estimates of the IPW model seem lower than expected.
+
+We can attempt a 'doubly robust' approach, in which we also make adjustment for all confounders, but the estimates are still largely driven by the weights assigned to participants, and although the point estimate increases, it is still noticeably lower than the ones from the other methods.
+
+```{r}
+model_ipw_dr <- svyglm(re78 ~ treat + age + educ + race + married + nodegree + re74 + re75, design = svydesign(~ 1, weights = ~ weights, data = lalonde))
+concise_summary(model_ipw_dr, lalonde)
+```
+
+Finally, if we removed the outlier (although it is debatable whether this is recommended or not), we can see that the estimates change substantially.
+
+```{r}
+lalonde_2 <- lalonde[-124,]
+sumtable(lalonde_2, out="return")
+```
+
+IPW results:
+
+```{r}
+model_ipw <- svyglm(re78 ~ treat, design = svydesign(~ 1, weights = ~ weights, data = lalonde_2))
+concise_summary(model_ipw, lalonde_2)
+```
+
+Doubly Robust results:
+
+```{r}
+model_ipw_dr <- svyglm(re78 ~ treat + age + educ + race + married + nodegree + re74 + re75, design = svydesign(~ 1, weights = ~ weights, data = lalonde_2))
+concise_summary(model_ipw_dr, lalonde_2)
+```

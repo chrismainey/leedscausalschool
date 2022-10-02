@@ -1,0 +1,218 @@
+---
+title: '#LeedsCausalSchool'
+author: "Tomova GD, Gilthorpe MS"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Activity 4(c). **Simulating Data with DAGitty R**
+
+### ***Learning objectives***
+
+-   Learn how to perform a simple simulation of multivariate normal data
+-   Recognise the power of simulation for exploring and highlighting flawed analytical strategies
+
+Load the required packages.
+
+```{r message=FALSE}
+packages <- c("dagitty", "ggplot2", "vtable")
+new_packages  <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) install.packages(new_packages)
+invisible(lapply(packages, require, character.only = TRUE))
+
+concise_summary <- function(Form,Data) {
+  mod  <- lm(Form, data=Data)
+  res  <- data.frame(cbind(coefficients(mod),confint(mod)))[-1,]
+  names(res) <- c("Estimate","L 95% CI","H 95% CI")
+  return(round(res,3)) }
+```
+
+### ***Task 1***. Explore the DAGitty R package.
+
+We are going to explore the `dagitty` package in R, which can be used for simulating data from a pre-specificed causal structure. We are going to draw an example DAG which will serve as the basis of our simulation, and will explore some of the data simulation basics.
+
+To begin with, assume we have the following variables: **E** - exposure, **O** - outcome, **C1** - confounder 1, **C2** - confounder 2, **CE** - competing exposure, **M** - mediator. We are first going to arrange these in a DAG according to their variable roles, using the `dagitty` function. This generally involves specifying two things - the positions of the variables within the DAG, and the size of the path coefficients among them. Below we specify the variable positions and then we assign a path coefficient to each relevant variable pair relationship, using some arbitrary values. We then simply plot the DAG and see what we have created - and if it's not exactly what we expected we can always go back to tweak it. We can see from the figure that we have managed to create the DAG we wanted - two confounders that cause an exposure and a competing exposure (which are not themsevles related). They in turn cause a mediator and all variables then cause a downstream outcome variable.
+
+```{r}
+DAG <- dagitty('dag {
+                
+                C1 [pos="0,0"]
+                C2 [pos="0,1"]
+                E  [pos="1,0"]
+                CE [pos="1,1"]
+                M  [pos="2,0.5"]
+                O  [pos="3,0.5"]
+
+                C1 -> E[beta=0.2]
+                C1 -> O [beta=0.3]
+                C1 -> CE [beta=0.05]
+                C1 -> M [beta=0.1]
+
+                C2 -> E[beta=0.5]
+                C2 -> O [beta=0.1]
+                C2 -> CE [beta=0.1]
+                C2 -> M [beta=0.2]
+
+                E  -> O [beta=0.3]
+                E  -> M [beta=0.2]
+
+                CE -> O [beta=0.2]
+                CE -> M [beta=0.2]
+
+                M  -> O  [beta=0.6]
+                
+                }')
+
+plot(DAG)
+```
+
+After we have specified the causal structure, we can move on to the next step, which is the actual data simulation. This can be achieved using either the `simulateSEM` function for continuous variables or `simulateLogistic` for binary variables. In this example we are going to be simulating continuous variables so we use the former. We call our data `data` (or something more creative!), and when using the function we specify which causal structure to use for the simulations (the one we called `DAG`), how many observations (`N=1000`), and `empirical=TRUE` which means the empirical covariance matrix will be equal to the population covariance matrix. We also print out a summary of the newly simulated dataset.
+
+```{r}
+data <- simulateSEM(DAG, N=1000, empirical=TRUE)
+st(data, out="return")
+```
+
+If we ran a model for estimating the effect of E on O and adjusted for all variables, including the mediator (i.e. estimated the *direct effect*), we should obtain exactly 0.3 which is what we specified in the first step. We can check if this is the case below (`options(scipen=999)` removes scientific notation).
+
+```{r}
+options(scipen=999)
+model <- lm(O ~ E + C1 + C2 + CE + M, data=data); concise_summary(model, data)
+```
+
+Alternatively, if we wanted to estimate the *total causal effect* of E on O, then we would need to remove M from the model. The true effect that we expect is the sum of: 1) the direct effect of E on O (0.3), and 2) the indirect effect of E on O which is through M. To calculate the latter, we need to multiply E-\>M by M-\>O, i.e. 0.2 \* 0.6 = 0.12. This means that the total causal effect should be 0.3 + 0.12 = 0.42. Below we demonstrate that this is estimated correctly.
+
+```{r}
+model_2 <- lm(O ~ E + C1 + C2 + CE, data=data); concise_summary(model_2, data)
+```
+
+The simulated variables are all standardised, i.e. they all have mean=0 and SD=1. Of course, it would rarely be the case that we are interested in standardised variables, as we often try to simulate data based on data seen in the real-world. Additionally, this also means that around half of the simulated values will be negative, which is often not plausible for what we want to simulate. We can modify the means and SDs as shown below, and then produce new summary statistics to observe the changes.
+
+```{r}
+data$C1 <- data$C1*20+100
+data$C2 <- data$C2*50+200
+data$CE <- data$CE*5+25
+data$E  <- data$E*20+80
+data$M  <- data$M*100+600
+data$O  <- data$O*80+300
+st(data, out="return")
+```
+
+We can now run the same models with the rescaled variables.
+
+```{r}
+model_rescaled <- lm(O ~ E + C1 + C2 + CE + M, data=data); concise_summary(model_rescaled, data)
+model_2_rescaled <- lm(O ~ E + C1 + C2 + CE, data=data); concise_summary(model_2_rescaled, data)
+```
+
+Does this mean that rescaling the variables no longer gives us the truth that we initially simulated?
+
+It might initially seem like the effects have changed and are no longer 0.3 and 0.42, respectively. But if we take a closer look we will realise they are simply rescaled. In both cases, the total causal effect is exactly 1.4 times larger than the direct effect. Therefore, even though we have completely changed what the variables *look* like, the underlying causal structure that we simulated has been maintained.
+
+### ***Task 2***. Practise simulating change scores.
+
+We will be examining a real-world example of mathematical coupling in one of Peter's early papers and unpick why his naïve solution failed to resolve the problem.
+
+The context is the analysis of change in lung function (estimated by Forced Expiratory Volume during the first second, FEV1) between ages 14 years (`fev14`) and 50 years (`fev50`) in 122 participants from the Newcastle Thousand Families cohort.
+
+Run the following code which creates a function that we will be using to plot figures.
+
+```{r}
+XYplot <- function(data,Mlab,Xlab,Ylab,Xlim,Ylim) { 
+  ggplot(data,aes(x=data[,1],y=data[,2])) + 
+    labs(title=Mlab,x=Xlab,y=Ylab,colour=NULL) +
+    geom_point(size=1.2,colour="blue") + 
+    stat_smooth(method=lm,se=TRUE,size=1.0,colour="dark red") +
+    theme(axis.text=element_text(colour="black",size=12),
+          axis.title=element_text(colour="black",size=14,face="bold"),
+          plot.title=element_text(size=16,face="bold"),legend.text=element_text(size=12)) +
+    coord_cartesian(xlim=Xlim,ylim=Ylim) }
+```
+
+**Drawing the DAG**
+
+First, we specify and plot a simple DAG (`fev_dag`) containing two variables, 1. FEV at age 14 years (`fev14`) 2. FEV1 at age 50 years (`fev50`)
+
+We also specify a path going from FEV14 to FEV50 with coefficient 0.3 to represent the relationship between them.
+
+```{r}
+fev_dag <- dagitty('dag{fev14 [pos="0,0"] 
+                        fev50 [pos="1,0"] 
+                        
+                        fev14 -> fev50 [beta=0.3] }')
+plot(fev_dag)
+```
+
+**Simulate the data and make the change-score**
+
+We simulate a sample of 122 individuals matching our simple DAG (`fev_dag`). The two simulated variables are then transformed to have the same means and SDs as was observed in the Newcastle Thousand Families sample. A composite change variable (`fev_c`) is then constructed and inspected to make sure the values are sensible.
+
+```{r}
+fev_sim <- simulateSEM(fev_dag, N=122, empirical=TRUE)
+fev_sim$fev14 <- (fev_sim$fev14*0.444)+2.7
+fev_sim$fev50 <- (fev_sim$fev50*0.888)+2.9
+fev_sim$fev_c <- fev_sim$fev50 - fev_sim$fev14
+st(fev_sim, out = "return")  
+```
+
+**Regress 'change' on 'baseline'**
+
+We regress change in FEV on FEV at age 14 (`fev_c ~ fev14`) and plot the relationship between them.
+
+```{r message=FALSE}
+fev_c_result <- lm(fev_c  ~ fev14, data = fev_sim); concise_summary(fev_c_result, fev_sim)
+
+XYplot(data=fev_sim[,c(1,3)],Mlab="Change in FEV vs FEV at age 14",Xlab="FEV at age 14",Ylab="Change in FEV",Xlim=c(1.75,3.75),Ylim=c(-2.5,2.5))
+```
+
+-   Are you surprised by the direction of the association?
+-   If not, why not?
+-   Imagine being in your first year working as an Epidemiologist and returning these results. What would you do?
+
+**Regress 'percentage change' on 'baseline'**
+
+Peter recognised something was afoot. Though not familiar with mathematical coupling, he noticed the 'law of initial values' was at play (i.e. that those with the highest values at age 14 seemed to have the greatest room for decline). To correct for this, he tried dividing the change variable by FEV at aged 14, to create a 'percentage change' variable.
+
+We reproduce this step by creating a percentage change variable `fev_pc`, which we again inspect, and regress on (and plot against) FEV at age 14 (`fev_pc ~ fev14`).
+
+```{r}
+fev_sim$fev_pc <- (fev_sim$fev50-fev_sim$fev14)/fev_sim$fev14*100
+st(fev_sim, out = "return") 
+```
+
+```{r}
+fev_pc_result <- lm(fev_pc  ~ fev14, data = fev_sim); concise_summary(fev_pc_result, fev_sim)
+
+XYplot(data=fev_sim[,c(1,4)],Mlab="Percentage Change in FEV vs FEV at age 14",Xlab="FEV at age 14",Ylab="Percentage Change in FEV",Xlim=c(1.75,3.75),Ylim=c(-60,60))
+```
+
+-   Are you surprised by the direction of the association?
+-   If not, why not?
+-   Again, imagine being in your first year working as an Epidemiologist and returning these results. What would you do?
+
+**Change vs Percentage Change**
+
+Peter recognised something was still afoot. The 'law of initial values' was still at play. Peter was told he was 'overthinking' and was encouraged to 'get on and publish'.
+
+We now compare the two variables, change in FEV and percentage change in FEV.
+
+-   What does the correlation between fev_pc and fev_c in `cor(fev-sim)` tell you?
+-   If you were reviewing this paper, what comments would you leave for Peter and the other authors?
+
+```{r}
+cor(fev_sim)
+```
+
+During peer-review, Peter was asked to speculate on why those with a higher FEV1 at aged-14 years seemed to have the greatest decline in lung function. He observed, "although... (it) may represent regression-to-the-mean, other explanations are plausible" before offering the following explanation:
+
+![](https://github.com/georgiatomova/LeedsCausalSchool/blob/master/4c_pic.png?raw=true)
+
+**The Total Causal Effect of Baseline on Follow-up**
+
+We need to re-think the question causally. Really, we are asking what level of *follow-up FEV* is caused by *baseline FEV*. So, we should simply analyse follow-up on baseline. Unfortunately, with only two datapoints, the true effect will be diluted by regression-to-the-mean.
+
+```{r}
+tce <- lm(fev50 ~ fev14, data = fev_sim); concise_summary(tce, fev_sim) 
+XYplot(data=fev_sim[,1:2],Mlab="Relationship between FEV at age 14 and FEV at age 50",Xlab="FEV at age 14",Ylab="FEV at age 50",Xlim=c(1.75,3.75),Ylim=c(0,5))
+```

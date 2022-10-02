@@ -1,0 +1,387 @@
+---
+title: '#LeedsCausalSchool'
+author: "Tennant PWG, Tomova GD"
+output:
+  html_document:
+    df_print: paged
+---
+
+## **Activity 4(a). Practicing mediation analysis**
+
+### ***Learning objectives***
+
+-   Practice conducting a counterfactual mediation analyses in R
+-   Practice interpreting four-way decomposition model outputs
+-   Estimate some specific counterfactual contrasts using the g-formula
+
+Begin by loading the necessary packages, and creating two functions to present summaries of the model results (point estimates and 95% CIs).
+
+```{r message=FALSE, warning=FALSE}
+
+packages <- c("devtools", 
+              "CMAverse", 
+              "curl", 
+              "vtable", 
+              "dplyr",
+              "tidyr",
+              "tibble",
+              "data.table",
+              "gfoRmula")
+
+new_packages  <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) install.packages(new_packages)
+
+suppressMessages(invisible(lapply(packages, require, character.only = TRUE)))
+
+data_4a <- read.csv(curl("https://raw.githubusercontent.com/georgiatomova/LeedsCausalSchool/master/4a_data.csv"))
+
+concise_summary <- function(Form,Data,Family) {
+  mod  <- glm(Form, data=Data, family=Family)
+  res  <- data.frame(cbind(coefficients(mod),confint(mod)))[-1,]
+  names(res) <- c("Estimate","L 95% CI","H 95% CI")
+  return(round(res,3)) }
+
+effect_results <- function(med_mod) {
+  med_res <- data.frame(cbind(med_mod$effect.pe, med_mod$effect.ci.low, med_mod$effect.ci.high))
+  names(med_res) <- c("Effect","L 95% CI","H 95% CI")
+  return(round(med_res,3)) }
+
+```
+
+We are going to be using simulated data (called data_4a) which includes the following variables, we've made them all binary for simplicity:
+
+-   **higher_ed** (the exposure); 0 = no higher education, 1 = education
+
+-   **early_death** (the outcome); 0 = not early death, 1 = early death
+
+-   **high_income** (the mediator); 0 = no high income, 1 = high income
+
+-   **bme**; 0 = not BME, 1 = BME
+
+-   **low_child_SEP**; 0 = not low SEP in childhood, 1 = low SEP in childhood
+
+-   **skilled_job**; 0 = no skilled job, 1 = skilled job
+
+Imagine we were interested in estimating the joint effect of attending higher education (`higher_ed`) and income in adulthood (`high_income`) on the risk of early mortality (`early_death`).
+
+Initially, we believe there are two confounders, childhood SEP (`low_child_SEP`) and ethnicity (`bme`).
+
+The relationship between these variables gives the DAG below. Familiarise yourself with this causal structure.
+
+![](https://github.com/georgiatomova/LeedsCausalSchool/blob/master/4a-pic.png?raw=true){width="600"}
+
+It is also good practice to familiarise ourselves with the summary statistics of the data. However, we created the simulation in a rush, so it is not very realistic. All variables are split approximately 50/50 into a lower and higher category.
+
+```{r message=FALSE, warning=FALSE}
+st(data_4a, out="return")
+```
+
+### ***Task 1. Estimate the total causal effect of higher education.***
+
+To begin with, we explore the total causal effect of the primary exposure (`higher_ed`) using a simple regression model. The model includes the two confounders (`bme` and `low_child_SEP`) that need adjusting for.
+
+```{r message=FALSE, warning=FALSE}
+
+exposure_effect <- glm(early_death ~ higher_ed + bme + low_child_SEP,
+                       data = data_4a,
+                       family = "quasipoisson") 
+
+suppressMessages(exp(concise_summary(exposure_effect, data_4a, "quasipoisson")))
+
+```
+
+> **[QUESTION] What do these results show?**
+
+### ***Task 2. Estimate the joint effects of higher education and income using regression-based methods***
+
+Let us now examine how much of the total causal effect of `higher_ed` is mediated by `income`. We are going to use the new `CMAverse` R package, reported in the [September 2021 issue of Epidemiology](https://journals.lww.com/epidem/Fulltext/2021/09000/CMAverse__A_Suite_of_Functions_for_Reproducible.23.aspx).
+
+We will start with a simpler model that includes no interaction terms. We will show all the output because navigating through the `CMAverse` outcome is half the battle!
+
+```{r message=FALSE, warning=FALSE}
+
+invisible(capture.output( #We need to suppress the progress bar to make the output cleaner
+  
+med_analysis_1 <- cmest(data = data_4a, 
+                        model = "rb", # This says that the model is 'regression based' 
+                        outcome = "early_death", # The outcome
+                        exposure = "higher_ed", # The exposure
+                        mediator = c("high_income"), # Here we can list all mediators 
+                        basec = c("low_child_SEP", "bme"), # These are the classical confounders 
+                        
+                        # For all mediators, we need to note what type of regression should 
+                        # be performed; we chose logistic because the mediator is binary
+                        
+                        mreg = list("logistic"), 
+                        
+                        yreg = "logistic", # We also need to note that the outcome model requires
+                        EMint = FALSE, # Here we are telling the model NOT to account for interactions 
+                        
+                        # We need to specify our exposure contrast:
+                        
+                        astar = 0, # Here you define the reference level...  
+                        a = 1, # ...And here we define the comparison level 
+                        
+                        # We also need to set a level of the mediator to calculate the controlled effects 
+                        # We chose  the default scenario of 'in the absence of the mediator'
+                        mval = list(0), yval = 1,  
+                        
+                        # You will usually need to use the imputation and bootstrap algorithm 
+                        # to estimate standard errors
+                        
+                        estimation = "imputation",  
+                        inference = "bootstrap", 
+                        nboot = 200) 
+
+))
+
+summary(med_analysis_1)
+```
+
+The output shows the results of an outcome regression model and a mediator regression model, but the most interesting and important results are shown in final part of the output, entitled *'Effect decomposition on the risk ratio scale via the regression-based approach'*.
+
+Here you will see a range of different estimates, but for a classical two-way decomposition we are only interested in:
+
+-   total causal effect (`Rte`)
+
+-   (total natural) direct effect (`Rtnde`)
+
+-   (pure natural) indirect effect (`Rpnie`)
+
+> **[QUESTION] What do the results appear to show?**
+
+The good news is the total causal effect estimated from this model is nearly identical to the total causal effect we estimated in the simpler Poisson regression model above; so we have at least not done anything catastrophically wrong!
+
+We should also check that the decomposition has been correctly estimated by testing whether the product of the direct effect and indirect effect is approximately equal to the total causal effect (using the `near` function). Note, for an additive model, we would expect the components to sum to the total rather than multiply.
+
+```{r message=FALSE, warning=FALSE}
+near(med_analysis_1$effect.pe["Rte"],
+     med_analysis_1$effect.pe["Rtnde"]*med_analysis_1$effect.pe["Rpnie"]
+     )
+
+```
+
+We made the simplifying assumption that there were no interactions, which may not be true. We are therefore going to run the model again, allowing for interactions. Again we will share the full output.
+
+```{r message=FALSE, warning=FALSE}
+
+invisible(capture.output( #We need to suppress the progress bar to make the output cleaner
+  
+med_analysis_2 <- cmest(data = data_4a, 
+                        model = "rb", 
+                        outcome = "early_death", 
+                        exposure = "higher_ed", 
+                        mediator = c("high_income"), 
+                        basec = c("low_child_SEP", "bme"),
+                        mreg = list("logistic"), 
+                        yreg = "logistic", 
+                        EMint = TRUE, # This time we are allowing for interactions 
+                        astar = 0, 
+                        a = 1, 
+                        mval = list(0), 
+                        yval = 1, 
+                        estimation = "imputation", 
+                        inference = "bootstrap", 
+                        nboot = 200)
+)) 
+
+summary(med_analysis_2)
+
+```
+
+This time the output is even more extensive! Fortunately, for VanderWeele's four-way decomposition we are only interested in the following:
+
+-   Total causal effect (`Rte`)
+-   Controlled direct effect (`Rcde`)
+-   (Pure natural) indirect effect (`Rpnie`)
+-   Reference interaction (`ERintref`)
+-   Mediated interaction (`ERintmed`).
+
+The total effect is more or less unchanged, and consists of four parts; a controlled direct effect (`Rcde`) of around RR=0.79, a pure natural indirect effect (`Rpnie`) of around RR=0.83, a reference interaction (`ERintref`) reported as an excess of around RR=0.05 and a mediating interaction (`ERintmed`) reported as an excess of around RR=0.07.
+
+> **[QUESTION FOR MASOCHISTIC DELEGATES] What do the results appear to show?**
+
+We're going to assume that you haven't made much sense of the four-way decomposition and therefore will try and explain what's going on.
+
+The first clue that something strange is going on is if you multiply all the RRs together they do not get anywhere near the total effect.
+
+```{r message=FALSE, warning=FALSE}
+near(med_analysis_2$effect.pe["Rte"],
+     med_analysis_2$effect.pe["Rcde"]*med_analysis_2$effect.pe["Rpnie"]*med_analysis_2$effect.pe["ERintref"]*med_analysis_2$effect.pe["ERintmed"]
+     )
+
+```
+
+However, if you multiply together just the controlled direct effect and the pure natural indirect effect you get a stronger effect than the total effect.
+
+```{r message=FALSE, warning=FALSE}
+print(med_analysis_2$effect.pe["Rte"])
+print(med_analysis_2$effect.pe["Rcde"]*med_analysis_2$effect.pe["Rpnie"])
+
+```
+
+What is going on? The answer comes from the proportion variables (labelled `(prop)`), which are negative. This suggests that the effect of education on mortality is *smaller* for people with *higher* income, and the effect of income on mortality is *smaller* for people with higher education.
+
+### ***Task 3. Estimate the joint effects of higher education and income using g-methods***
+
+So far, we have assumed there are no mediator-outcome confounders or intermediate confounders. In fact, we simulated an intermediate confounder, skilled employment (`skilled_job`), which was caused by Higher Education and in turn caused income. We cannot account for this using conditioning and will therefore need to use g-methods.
+
+The 'true' DAG which includes adult occupation as an intermediate confounder is shown below.
+
+![](https://github.com/georgiatomova/LeedsCausalSchool/blob/master/4a-pic2.png?raw=true){width="600"}
+
+The `CMAverse` package fortunately includes the option to perform both *marginal structural models* and *g-formula* estimation. We will use the g-formula because this is slightly simpler. We will limit the outputs to the causal effects table.
+
+```{r message=FALSE, warning=FALSE}
+
+invisible(capture.output( #We need to suppress the progress bar to make the output cleaner
+  
+med_analysis_3 <- cmest(data = data_4a, 
+                        model = "gformula", # Because this time we are using the g-formula
+                        outcome = "early_death", 
+                        exposure = "higher_ed", 
+                        mediator = c("high_income"), 
+                        basec = c("low_child_SEP", "bme"), 
+                        postc = c("skilled_job"), 
+                        postcreg = list("logistic"), 
+                        mreg = list("logistic"), 
+                        yreg = "logistic", 
+                        EMint = TRUE, 
+                        astar = 0, 
+                        a = 1, 
+                        mval = list(0), 
+                        yval = 1, 
+                        estimation = "imputation", 
+                        inference = "bootstrap", 
+                        nboot = 200, 
+                        full = TRUE)
+))
+
+effect_results(med_analysis_3)
+
+```
+
+Briefly look at the relevant decomposition results, i.e. `Rcde`, `rRpnie`, `rERintref` and `rERinmted.`
+
+> **[QUESTION] How are these estimates different to the ones estimated by standard regression methods? Why do you think any differences might exist?**
+
+### ***Task 4. Estimate the specific counterfactual contrasts using the g-formula***
+
+Even if you can understand and interpret Vanderweele's four-way decomposition, it will be extremely difficult to communicate them to a non-technical audience. We therefore think it is better to try and estimate the risk of the outcome for specific exposure regimes, and report the risk differences between these regimes.
+
+To do this, we need to switch to the more powerful `gfoRmula` package. Unfortunately, it is *far* less friendly and *far* more fussy.
+
+The first problem is that the `gfoRmula` package requires the data to be in a very specific long format, where successive measures in time are represented as rows within each individuals.
+
+The gfoRmula package also does away with friendly terms like *'mediators'* and *'intermediate confounders'*, and instead just classifies all variables are either *'baseline'*, *'time-varying'*, or the *'outcome'*. To clarify, *'baseline variables'* are time-fixed classical confounders that take a fixed value at *all* timepoints whereas *'time-varying variables'* include your exposure, mediator, and any intermediate confounders.
+
+In a repeated measures experiment, you might have two or three measures of your exposure giving a clear sense of 'time'. To do a mediation analysis using the `gfoRmula` package, you have to think of your exposure and mediator as repeated measures across two timepoints. You will always need as many time points as there are exposures and/or mediators in your exposure regime.
+
+In this example, we consider the baseline variables and exposure to occur at t=0, and the mediator, mediator-outcome confounder and outcome to occur at t=1. Without too much explanation, we will use this to re-label and restructure the data in the format expected by the `gfoRmula` package. We will present the first ten rows of the data for you.
+
+```{r message=FALSE, warning=FALSE}
+
+data_4a_gform <- data_4a %>% 
+  # First we need to add a time index to the end of the of each variable
+  rename(bme_t_0           = bme,
+         low_child_SEP_t_0 = low_child_SEP,
+         higher_ed_t_0     = higher_ed,
+         skilled_job_t_1   = skilled_job,
+         high_income_t_1   = high_income,
+         early_death_t_1   = early_death) %>% 
+  # For the time-invariant variables, we need copies for all time points, 
+  # so we will create duplicates versions for all other timepoints  
+  mutate(bme_t_1 = bme_t_0,
+         low_child_SEP_t_1 = low_child_SEP_t_0,
+         higher_ed_t_1 = higher_ed_t_0) %>% 
+  # In order to reshape the data We will need an id for each participant 
+  rowid_to_column(var = "id") %>% 
+  # We now have everything we need to transform the data into the long format, 
+  # but we need to tell R that the time value for each variable occurs after _t_ 
+  pivot_longer(-id,
+             names_to = c(".value", "time"),
+             names_sep = "_t_")
+# Finally, because gfoRmula is so picky, we need to ensure the data are stored as a data.table
+data_4a_gform <- data.table(data_4a_gform)
+# And that the time variable is an integer
+data_4a_gform$time <- as.integer(data_4a_gform$time)
+
+data_4a_gform
+
+```
+
+With the data in the right format, we can now run the `gfoRmula` command! For simplicity, we will as it to estimate the risk of early death in four scenarios and compare the risk relative to the first scenario
+
+1.  `higher_ed`=0, `high_income`=0 (reference)
+
+2.  `higher_ed`=1, `high_income`=0
+
+3.  `higher_ed`=0, `high_income`=1
+
+4.  `higher_ed`=1, `high_income`=1
+
+```{r message=FALSE, warning=FALSE}
+
+g_results <- gformula(obs_data=data_4a_gform, # Our data, in the right format!
+                      id='id', # The id variable
+                      time_name='time', # The time variable
+                      covnames=c('higher_ed', 'skilled_job', 'high_income'), # The time-varying covariates
+                      covtypes=c('binary', 'binary', 'binary'), # This vector states the format of thse covariates
+                      outcome_name='early_death', # The outcome
+                      outcome_type='binary_eof', # The format of the outcome
+                      basecovs=c('bme', 'low_child_SEP'), # The baseline variables
+                      
+                      # We have to provide models for estimating each variable in turn:
+                      # If we get this wrong, it will lead to error and bias being carried forward at each stage
+                      # We've therefore added interactions between `higher_ed`, `skilled_job`, and `high_income`
+                      
+                      covparams=list(covmodels = c(higher_ed ~ bme + low_child_SEP, 
+                                                   skilled_job ~ bme + low_child_SEP + higher_ed,
+                                                   high_income ~ bme + low_child_SEP + higher_ed + 
+                                                                 skilled_job + higher_ed*skilled_job)),
+                      
+                      # We also need a model for the outcome; the same rules apply as above
+                      
+                      ymodel = early_death ~ bme + low_child_SEP + higher_ed +
+                                             skilled_job + high_income + 
+                                             higher_ed*skilled_job + 
+                                             higher_ed*high_income, 
+                      
+                      # Now we have to define every scenario we want evaluating, we start 
+                      # by listing the variables that we want to 'do', we do this for the nunber 
+                      # of scenarios we wish to estimate, here there are four
+                      
+                      intvars = list(c('higher_ed', 'high_income'),     
+                        c('higher_ed', 'high_income'),    
+                        c('higher_ed', 'high_income'),   
+                        c('higher_ed', 'high_income')),
+                      
+                      # Finally, we provide the values of each variable for each scenario, 
+                      # The '2' refers to the fact that there are two timepoints 
+                                           
+                                           # The first scenario is E0M0
+                      interventions = list(list(c(static, rep(0, 2)),
+                                                c(static, rep(0, 2))),
+                                           # The second scenario is E1M0
+                                           list(c(static, rep(1, 2)),
+                                                c(static, rep(0, 2))),
+                                           # The third scenario is E0M1
+                                           list(c(static, rep(0, 2)),
+                                                c(static, rep(1, 2))),
+                                           # The final scenario is E1M1
+                                           list(c(static, rep(1, 2)),
+                                                c(static, rep(1, 2)))), 
+                      
+                      ref_int = 1, # Here we say we want the first scenario to be the reference
+                      int_descript = c('E0M0', 'E1M0', 'E0M1', 'E1M1'), # Optionally you can add names for each scenario
+                      nsamples=200, # The number of bootstrap samples used to estimate the CIs
+                      seed=1234, # You have to provide a seed for the boostrapping
+                      show_progress = FALSE # We've turned off the progress bar to make the results cleaner
+                      )
+
+cat(g_results$header) 
+g_results$result[,c(2,4,6,7,8,10,11)]
+
+```
+
+> **[QUESTION] What do these results appear to show? Do you find them easier to interpret than the four-way decomposition?**
